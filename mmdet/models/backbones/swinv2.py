@@ -274,7 +274,6 @@ class SwinTransformerBlock(nn.Module):
 
     Args:
         dim (int): Number of input channels.
-        input_resolution (tuple[int]): Input resulotion.
         num_heads (int): Number of attention heads.
         window_size (int): Window size.
         shift_size (int): Shift size for SW-MSA.
@@ -291,7 +290,6 @@ class SwinTransformerBlock(nn.Module):
     def __init__(
         self,
         dim,
-        input_resolution,
         num_heads,
         window_size=7,
         shift_size=0,
@@ -306,15 +304,10 @@ class SwinTransformerBlock(nn.Module):
     ):
         super().__init__()
         self.dim = dim
-        self.input_resolution = input_resolution
         self.num_heads = num_heads
         self.window_size = window_size
         self.shift_size = shift_size
         self.mlp_ratio = mlp_ratio
-        if min(self.input_resolution) <= self.window_size:
-            # if window size is larger than input resolution, we don't partition windows
-            self.shift_size = 0
-            self.window_size = min(self.input_resolution)
         assert (
             0 <= self.shift_size < self.window_size
         ), "shift_size must in 0-window_size"
@@ -400,23 +393,26 @@ class PatchMerging(nn.Module):
     r"""Patch Merging Layer.
 
     Args:
-        input_resolution (tuple[int]): Resolution of input feature.
         dim (int): Number of input channels.
         norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
     """
 
-    def __init__(self, input_resolution, dim, norm_layer=nn.LayerNorm):
+    def __init__(self, dim, norm_layer=nn.LayerNorm):
         super().__init__()
-        self.input_resolution = input_resolution
         self.dim = dim
         self.reduction = nn.Linear(4 * dim, 2 * dim, bias=False)
         self.norm = norm_layer(2 * dim)
 
-    def forward(self, x):
+    def forward(self, x, H, W):
+        """Forward function.
+
+        Arguments:
+            x: B, H*W, C
+            H, W: spatial resolution of input feature
+
+        Returns
+            x, H, W after downsampling
         """
-        x: B, H*W, C
-        """
-        H, W = self.input_resolution
         B, L, C = x.shape
         assert L == H * W, "input feature has wrong size"
         assert H % 2 == 0 and W % 2 == 0, f"x size ({H}*{W}) are not even."
@@ -444,7 +440,6 @@ class BasicLayer(nn.Module):
 
     Args:
         dim (int): Number of input channels.
-        input_resolution (tuple[int]): Input resolution.
         depth (int): Number of blocks.
         num_heads (int): Number of attention heads.
         mlp_ratio (float): Ratio of mlp hidden dim to embedding dim.
@@ -462,7 +457,6 @@ class BasicLayer(nn.Module):
     def __init__(
         self,
         dim,
-        input_resolution,
         depth,
         num_heads,
         window_size=7,
@@ -481,7 +475,6 @@ class BasicLayer(nn.Module):
         self.window_size = window_size
         self.shift_size = window_size // 2
         self.dim = dim
-        self.input_resolution = input_resolution
         self.depth = depth
         self.use_checkpoint = use_checkpoint
 
@@ -490,7 +483,6 @@ class BasicLayer(nn.Module):
             [
                 SwinTransformerBlock(
                     dim=dim,
-                    input_resolution=input_resolution,
                     num_heads=num_heads,
                     window_size=self.window_size,
                     shift_size=0 if (i % 2 == 0) else self.shift_size,
@@ -510,9 +502,7 @@ class BasicLayer(nn.Module):
 
         # patch merging layer
         if downsample is not None:
-            self.downsample = downsample(
-                input_resolution, dim=dim, norm_layer=norm_layer
-            )
+            self.downsample = downsample(dim=dim, norm_layer=norm_layer)
         else:
             self.downsample = None
 
@@ -677,10 +667,6 @@ class SwinTransformerV2(nn.Module):
         for i_layer in range(self.num_layers):
             layer = BasicLayer(
                 dim=int(embed_dim * 2**i_layer),
-                input_resolution=(
-                    patches_resolution[0] // (2**i_layer),
-                    patches_resolution[1] // (2**i_layer),
-                ),
                 depth=depths[i_layer],
                 num_heads=num_heads[i_layer],
                 window_size=window_size,
