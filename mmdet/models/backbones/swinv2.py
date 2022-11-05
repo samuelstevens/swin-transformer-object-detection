@@ -193,11 +193,8 @@ class WindowAttention(nn.Module):
             )
         qkv = F.linear(input=x, weight=self.qkv.weight, bias=qkv_bias)
         qkv = qkv.reshape(B_, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
-        q, k, v = (
-            qkv[0],
-            qkv[1],
-            qkv[2],
-        )  # make torchscript happy (cannot use tensor as tuple)
+        # make torchscript happy (cannot use tensor as tuple)
+        q, k, v = (qkv[0], qkv[1], qkv[2])
 
         # cosine attention
         attn = F.normalize(q, dim=-1) @ F.normalize(k, dim=-1).transpose(-2, -1)
@@ -214,9 +211,9 @@ class WindowAttention(nn.Module):
             self.window_size[0] * self.window_size[1],
             -1,
         )  # Wh*Ww,Wh*Ww,nH
-        relative_position_bias = relative_position_bias.permute(
-            2, 0, 1
-        ).contiguous()  # nH, Wh*Ww, Wh*Ww
+
+        # nH, Wh*Ww, Wh*Ww
+        relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()
         relative_position_bias = 16 * torch.sigmoid(relative_position_bias)
         attn = attn + relative_position_bias.unsqueeze(0)
 
@@ -378,17 +375,14 @@ class SwinTransformerBlock(nn.Module):
             shifted_x = x
 
         # partition windows
-        x_windows = window_partition(
-            shifted_x, self.window_size
-        )  # nW*B, window_size, window_size, C
-        x_windows = x_windows.view(
-            -1, self.window_size * self.window_size, C
-        )  # nW*B, window_size*window_size, C
+        # nW*B, window_size, window_size, C
+        x_windows = window_partition(shifted_x, self.window_size)
+        # nW*B, window_size*window_size, C
+        x_windows = x_windows.view(-1, self.window_size * self.window_size, C)
 
         # W-MSA/SW-MSA
-        attn_windows = self.attn(
-            x_windows, mask=self.attn_mask
-        )  # nW*B, window_size*window_size, C
+        # nW*B, window_size*window_size, C
+        attn_windows = self.attn(x_windows, mask=self.attn_mask)
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
