@@ -366,6 +366,12 @@ class SwinTransformerBlock(nn.Module):
         shortcut = x
         x = x.view(B, H, W, C)
 
+        # pad feature maps to multiples of window size
+        pad_r = (self.window_size - W % self.window_size) % self.window_size
+        pad_b = (self.window_size - H % self.window_size) % self.window_size
+        x = F.pad(x, (0, 0, 0, pad_r, 0, pad_b))
+        _, H_pad, W_pad, _ = x.shape
+
         # cyclic shift
         if self.shift_size > 0:
             shifted_x = torch.roll(
