@@ -12,6 +12,10 @@ import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 
+from ..builder import BACKBONES
+
+from mmdet.utils import get_root_logger
+
 
 class Mlp(nn.Module):
     def __init__(
@@ -75,10 +79,10 @@ def window_reverse(windows, window_size, H, W):
     return x
 
 
-def calc_attn_mask(H, W, window_size, shift_size):
+def calc_attn_mask(H, W, window_size, shift_size, device):
     Hp = int(np.ceil(H / window_size)) * window_size
     Wp = int(np.ceil(W / window_size)) * window_size
-    img_mask = torch.zeros((1, Hp, Wp, 1))  # 1 Hp Wp 1
+    img_mask = torch.zeros((1, Hp, Wp, 1), device=device)  # 1 Hp Wp 1
     h_slices = (
         slice(0, -window_size),
         slice(-window_size, -shift_size),
@@ -101,6 +105,7 @@ def calc_attn_mask(H, W, window_size, shift_size):
     attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(
         attn_mask == 0, float(0.0)
     )
+    return attn_mask
 
 
 class WindowAttention(nn.Module):
@@ -204,7 +209,8 @@ class WindowAttention(nn.Module):
         self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, x, mask=None):
-        """
+        """Forward function.
+
         Args:
             x: input features with shape of (num_windows*B, N, C)
             mask: (0/-inf) mask with shape of (num_windows, Wh*Ww, Wh*Ww) or None
@@ -334,6 +340,13 @@ class SwinTransformerBlock(nn.Module):
         )
 
     def forward(self, x, H, W, attn_mask):
+        """Forward function.
+
+        Args:
+            x: Input feature, tensor size (B, H*W, C).
+            H, W: Spatial resolution of the input feature.
+            mask_matrix: Attention mask for cyclic shift.
+        """
         B, L, C = x.shape
         assert L == H * W, "input feature has wrong size"
 
@@ -453,11 +466,11 @@ class BasicLayer(nn.Module):
     """A basic Swin Transformer layer for one stage.
 
     Args:
-        dim (int): Number of input channels.
+        dim (int): Number of feature channels.
         depth (int): Number of blocks.
         num_heads (int): Number of attention heads.
         window_size (int): Local window size. Default: 7.
-        mlp_ratio (float): Ratio of mlp hidden dim to embedding dim.  Default: 4.
+        mlp_ratio (float): Ratio of mlp hidden dim to embedding dim. Default: 4.
         qkv_bias (bool, optional): If True, add a learnable bias to query, key, value. Default: True
         drop (float, optional): Dropout rate. Default: 0.0
         attn_drop (float, optional): Attention dropout rate. Default: 0.0
@@ -521,7 +534,14 @@ class BasicLayer(nn.Module):
             self.downsample = None
 
     def forward(self, x, H, W):
-        attn_mask = calc_attn_mask(H, W, self.window_size, self.shift_size)
+        """Forward function.
+
+        Args:
+            x: Input feature, tensor size (B, H*W, C).
+            H, W: Spatial resolution of the input feature.
+        """
+
+        attn_mask = calc_attn_mask(H, W, self.window_size, self.shift_size, x.device)
 
         for blk in self.blocks:
             if self.use_checkpoint:
@@ -596,30 +616,31 @@ class PatchEmbed(nn.Module):
         return x, Wh, Ww
 
 
+@BACKBONES.register_module()
 class SwinTransformerV2(nn.Module):
-    r"""Swin Transformer
+    r"""Swin Transformer backbone.
         A PyTorch impl of : `Swin Transformer: Hierarchical Vision Transformer using Shifted Windows`  -
           https://arxiv.org/pdf/2103.14030
 
     Args:
-        pretrain_img_size (int | tuple(int)): Input image size for training the pretrained model,
+        pretrain_img_size (int): Input image size for training the pretrained model,
             used in absolute position embedding. Default 224.
-        patch_size (int | tuple(int)): Patch size. Default: 4
-        in_chans (int): Number of input image channels. Default: 3
-        num_classes (int): Number of classes for classification head. Default: 1000
-        embed_dim (int): Patch embedding dimension. Default: 96
-        depths (tuple(int)): Depth of each Swin Transformer layer.
+        patch_size (int | tuple(int)): Patch size. Default: 4.
+        in_chans (int): Number of input image channels. Default: 3.
+        embed_dim (int): Patch embedding dimension. Default: 96.
+        depths (tuple(int)): Depths of each Swin Transformer stage.
         num_heads (tuple(int)): Number of attention heads in different layers.
-        window_size (int): Window size. Default: 7
-        mlp_ratio (float): Ratio of mlp hidden dim to embedding dim. Default: 4
+        window_size (int): Window size. Default: 7.
+        mlp_ratio (float): Ratio of mlp hidden dim to embedding dim. Default: 4.
         qkv_bias (bool): If True, add a learnable bias to query, key, value. Default: True
-        drop_rate (float): Dropout rate. Default: 0
-        attn_drop_rate (float): Attention dropout rate. Default: 0
-        drop_path_rate (float): Stochastic depth rate. Default: 0.1
+        drop_rate (float): Dropout rate. Default: 0.
+        attn_drop_rate (float): Attention dropout rate. Default: 0.
+        drop_path_rate (float): Stochastic depth rate. Default: 0.2.
         norm_layer (nn.Module): Normalization layer. Default: nn.LayerNorm.
-        ape (bool): If True, add absolute position embedding to the patch embedding. Default: False
-        patch_norm (bool): If True, add normalization after patch embedding. Default: True
-        use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False
+        ape (bool): If True, add absolute position embedding to the patch embedding. Default: False.
+        patch_norm (bool): If True, add normalization after patch embedding. Default: True.
+        out_indices (tuple(int)): Output from which stages.
+        use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False.
         pretrained_window_sizes (tuple(int)): Pretrained window sizes of each layer.
     """
 
@@ -628,7 +649,6 @@ class SwinTransformerV2(nn.Module):
         pretrain_img_size=224,
         patch_size=4,
         in_chans=3,
-        num_classes=1000,
         embed_dim=96,
         depths=[2, 2, 6, 2],
         num_heads=[3, 6, 12, 24],
@@ -637,24 +657,24 @@ class SwinTransformerV2(nn.Module):
         qkv_bias=True,
         drop_rate=0.0,
         attn_drop_rate=0.0,
-        drop_path_rate=0.1,
+        drop_path_rate=0.2,
         norm_layer=nn.LayerNorm,
         ape=False,
         patch_norm=True,
+        out_indices=(0, 1, 2, 3),
         use_checkpoint=False,
         pretrained_window_sizes=[0, 0, 0, 0],
-        **kwargs,
+        pretrained=None,
     ):
         super().__init__()
 
-        self.num_classes = num_classes
         self.pretrain_img_size = pretrain_img_size
         self.num_layers = len(depths)
         self.embed_dim = embed_dim
         self.ape = ape
         self.patch_norm = patch_norm
-        self.num_features = int(embed_dim * 2 ** (self.num_layers - 1))
-        self.mlp_ratio = mlp_ratio
+        self.out_indices = out_indices
+        self.pretrained = pretrained
 
         # split image into non-overlapping patches
         self.patch_embed = PatchEmbed(
@@ -683,7 +703,7 @@ class SwinTransformerV2(nn.Module):
                 depth=depths[i_layer],
                 num_heads=num_heads[i_layer],
                 window_size=window_size,
-                mlp_ratio=self.mlp_ratio,
+                mlp_ratio=mlp_ratio,
                 qkv_bias=qkv_bias,
                 drop=drop_rate,
                 attn_drop=attn_drop_rate,
@@ -695,14 +715,11 @@ class SwinTransformerV2(nn.Module):
             )
             self.layers.append(layer)
 
-        self.norm = norm_layer(self.num_features)
-        self.avgpool = nn.AdaptiveAvgPool1d(1)
+        self.num_features = [int(embed_dim * 2**i) for i in range(self.num_layers)]
 
-        # Checks if we are doing hierarchical classification or not.
-        self.head = (
-            nn.Linear(self.num_features, num_classes)
-            if num_classes > 0
-            else nn.Identity()
+        # Add a norm layer for each output
+        self.norms = nn.ModuleDict(
+            {f"norm{i}": norm_layer(self.num_features[i]) for i in out_indices}
         )
 
         self.apply(self._init_weights)
@@ -718,6 +735,9 @@ class SwinTransformerV2(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
+    def init_weights(self):
+        load_pretrained(self.pretrained, self)
+
     @torch.jit.ignore
     def no_weight_decay(self):
         return {"absolute_pos_embed"}
@@ -727,6 +747,7 @@ class SwinTransformerV2(nn.Module):
         return {"cpb_mlp", "logit_scale", "relative_position_bias_table"}
 
     def forward(self, x):
+        """Forward function."""
         x, Wh, Ww = self.patch_embed(x)
 
         if self.ape:
@@ -734,15 +755,153 @@ class SwinTransformerV2(nn.Module):
 
         x = self.pos_drop(x)
 
-        for layer in self.layers:
-            x = layer(x)
+        outs = []
+        for i, layer in enumerate(self.layers):
+            x_out, H, W, x, Wh, Ww = layer(x, Wh, Ww)
 
-        x = self.norm(x)  # B L C
-        x = self.avgpool(x.transpose(1, 2))  # B C 1
-        x = torch.flatten(x, 1)
-        return x
 
-    def forward(self, x):
-        x = self.forward_features(x)
-        x = self.head(x)
-        return x
+            if i in self.out_indices:
+                x_out = self.norms[f"norm{i}"](x_out)
+
+                out = (
+                    x_out.view(-1, H, W, self.num_features[i])
+                    .permute(0, 3, 1, 2)
+                    .contiguous()
+                )
+                outs.append(out)
+
+        return tuple(outs)
+
+
+# region UTILITIES
+
+
+def load_pretrained(pretrained, model):
+    logger = get_root_logger()
+    logger.info("Loading weight for fine-tuning. [path: %s]", pretrained)
+
+    checkpoint = torch.load(pretrained, map_location="cpu")
+    state_dict = checkpoint["model"]
+
+    # delete relative_position_index since we always re-init it
+    relative_position_index_keys = [
+        k for k in state_dict.keys() if "relative_position_index" in k
+    ]
+    for k in relative_position_index_keys:
+        del state_dict[k]
+
+    # delete relative_coords_table since we always re-init it
+    relative_position_index_keys = [
+        k for k in state_dict.keys() if "relative_coords_table" in k
+    ]
+    for k in relative_position_index_keys:
+        del state_dict[k]
+
+    # delete attn_mask since we always re-init it
+    attn_mask_keys = [k for k in state_dict.keys() if "attn_mask" in k]
+    for k in attn_mask_keys:
+        del state_dict[k]
+
+    # delete linear head since we just use the raw features
+    linear_head_keys = [k for k in state_dict.keys() if "head" in k]
+    for k in linear_head_keys:
+        del state_dict[k]
+
+    # bicubic interpolate relative_position_bias_table if not match
+    relative_position_bias_table_keys = [
+        k for k in state_dict.keys() if "relative_position_bias_table" in k
+    ]
+    for k in relative_position_bias_table_keys:
+        relative_position_bias_table_pretrained = state_dict[k]
+        relative_position_bias_table_current = model.state_dict()[k]
+        L1, nH1 = relative_position_bias_table_pretrained.size()
+        L2, nH2 = relative_position_bias_table_current.size()
+        if nH1 != nH2:
+            logger.warning(f"Error in loading {k}, passing......")
+        else:
+            if L1 != L2:
+                # bicubic interpolate relative_position_bias_table if not match
+                S1 = int(L1**0.5)
+                S2 = int(L2**0.5)
+                relative_position_bias_table_pretrained_resized = (
+                    torch.nn.functional.interpolate(
+                        relative_position_bias_table_pretrained.permute(1, 0).view(
+                            1, nH1, S1, S1
+                        ),
+                        size=(S2, S2),
+                        mode="bicubic",
+                    )
+                )
+                state_dict[k] = relative_position_bias_table_pretrained_resized.view(
+                    nH2, L2
+                ).permute(1, 0)
+
+    # bicubic interpolate absolute_pos_embed if not match
+    absolute_pos_embed_keys = [
+        k for k in state_dict.keys() if "absolute_pos_embed" in k
+    ]
+    for k in absolute_pos_embed_keys:
+        # dpe
+        absolute_pos_embed_pretrained = state_dict[k]
+        absolute_pos_embed_current = model.state_dict()[k]
+        _, L1, C1 = absolute_pos_embed_pretrained.size()
+        _, L2, C2 = absolute_pos_embed_current.size()
+        if C1 != C1:
+            logger.warning(f"Error in loading {k}, passing......")
+        else:
+            if L1 != L2:
+                S1 = int(L1**0.5)
+                S2 = int(L2**0.5)
+                absolute_pos_embed_pretrained = absolute_pos_embed_pretrained.reshape(
+                    -1, S1, S1, C1
+                )
+                absolute_pos_embed_pretrained = absolute_pos_embed_pretrained.permute(
+                    0, 3, 1, 2
+                )
+                absolute_pos_embed_pretrained_resized = torch.nn.functional.interpolate(
+                    absolute_pos_embed_pretrained, size=(S2, S2), mode="bicubic"
+                )
+                absolute_pos_embed_pretrained_resized = (
+                    absolute_pos_embed_pretrained_resized.permute(0, 2, 3, 1)
+                )
+                absolute_pos_embed_pretrained_resized = (
+                    absolute_pos_embed_pretrained_resized.flatten(1, 2)
+                )
+                state_dict[k] = absolute_pos_embed_pretrained_resized
+
+    msg = model.load_state_dict(state_dict, strict=False)
+    for key in msg.missing_keys:
+        # Re-initialize positional stuff
+        if (
+            "relative_coords_table" in key
+            or "relative_position_index" in key
+            or "attn_mask" in key
+        ):
+            continue
+
+        # Initialize norms because they are not from the pre-trained model
+        if "norms" in key:
+            continue
+
+        # logit_clamp_max is a static buffer; we don't care if it's not loaded
+        # from the state dict
+        if "logit_clamp_max" in key:
+            continue
+
+        raise ValueError(key)
+
+    for key in msg.unexpected_keys:
+        if "norm" in key:
+            continue
+
+        raise ValueError(key)
+
+    logger.info(msg)
+
+    logger.info("Loaded pre-trained weights.")
+
+    del checkpoint
+    torch.cuda.empty_cache()
+
+
+# endregion
