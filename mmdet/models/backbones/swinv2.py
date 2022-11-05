@@ -379,6 +379,10 @@ class SwinTransformerBlock(nn.Module):
             )
         else:
             x = shifted_x
+
+        if pad_r > 0 or pad_b > 0:
+            x = x[:, :H, :W, :].contiguous()
+
         x = x.view(B, H * W, C)
         x = shortcut + self.drop_path(self.norm1(x))
 
@@ -420,6 +424,13 @@ class PatchMerging(nn.Module):
 
         x = x.view(B, H, W, C)
 
+        # NOTE: padding
+        should_pad = (H % 2 == 1) or (W % 2 == 1)
+        if should_pad:
+            x = F.pad(x, (0, 0, 0, W % 2, 0, H % 2))
+
+        _, Hp, Wp, _ = x.shape
+
         x0 = x[:, 0::2, 0::2, :]  # B H/2 W/2 C
         x1 = x[:, 1::2, 0::2, :]  # B H/2 W/2 C
         x2 = x[:, 0::2, 1::2, :]  # B H/2 W/2 C
@@ -432,7 +443,7 @@ class PatchMerging(nn.Module):
         x = self.reduction(x)
         x = self.norm(x)
 
-        return x
+        return x, Hp // 2, Wp // 2
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}"
@@ -518,8 +529,10 @@ class BasicLayer(nn.Module):
             else:
                 x = blk(x, H, W, attn_mask)
         if self.downsample is not None:
-            x = self.downsample(x)
-        return x
+            x_down, Hd, Wd = self.downsample(x, H, W)
+            return x, H, W, x_down, Hd, Wd
+        else:
+            return x, H, W, x, H, W
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, depth={self.depth}"
