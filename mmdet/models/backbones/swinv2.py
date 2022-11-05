@@ -338,6 +338,7 @@ class SwinTransformerBlock(nn.Module):
         assert L == H * W, "input feature has wrong size"
 
         shortcut = x
+        # v2 has no norm here (post-norm for stability)
         x = x.view(B, H, W, C)
 
         # pad feature maps to multiples of window size
@@ -368,7 +369,8 @@ class SwinTransformerBlock(nn.Module):
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
-        shifted_x = window_reverse(attn_windows, self.window_size, H, W)  # B H' W' C
+        # B H' W' C
+        shifted_x = window_reverse(attn_windows, self.window_size, H_pad, W_pad)
 
         # reverse cyclic shift
         if self.shift_size > 0:
@@ -415,7 +417,6 @@ class PatchMerging(nn.Module):
         """
         B, L, C = x.shape
         assert L == H * W, "input feature has wrong size"
-        assert H % 2 == 0 and W % 2 == 0, f"x size ({H}*{W}) are not even."
 
         x = x.view(B, H, W, C)
 
@@ -426,6 +427,8 @@ class PatchMerging(nn.Module):
         x = torch.cat([x0, x1, x2, x3], -1)  # B H/2 W/2 4*C
         x = x.view(B, -1, 4 * C)  # B H/2*W/2 4*C
 
+        # NOTE: the order of these ops is reversed from v1 to v2 because
+        # self.norm is 2 * dim, and reduction goes from 4 * dim to 2 * dim.
         x = self.reduction(x)
         x = self.norm(x)
 
@@ -442,8 +445,8 @@ class BasicLayer(nn.Module):
         dim (int): Number of input channels.
         depth (int): Number of blocks.
         num_heads (int): Number of attention heads.
-        mlp_ratio (float): Ratio of mlp hidden dim to embedding dim.
         window_size (int): Local window size. Default: 7.
+        mlp_ratio (float): Ratio of mlp hidden dim to embedding dim.  Default: 4.
         qkv_bias (bool, optional): If True, add a learnable bias to query, key, value. Default: True
         drop (float, optional): Dropout rate. Default: 0.0
         attn_drop (float, optional): Attention dropout rate. Default: 0.0
