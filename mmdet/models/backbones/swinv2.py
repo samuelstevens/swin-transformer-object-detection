@@ -549,27 +549,16 @@ class PatchEmbed(nn.Module):
     r"""Image to Patch Embedding
 
     Args:
-        img_size (int): Image size.  Default: 224.
         patch_size (int): Patch token size. Default: 4.
         in_chans (int): Number of input image channels. Default: 3.
         embed_dim (int): Number of linear projection output channels. Default: 96.
         norm_layer (nn.Module, optional): Normalization layer. Default: None
     """
 
-    def __init__(
-        self, img_size=224, patch_size=4, in_chans=3, embed_dim=96, norm_layer=None
-    ):
+    def __init__(self, patch_size=4, in_chans=3, embed_dim=96, norm_layer=None):
         super().__init__()
-        img_size = to_2tuple(img_size)
         patch_size = to_2tuple(patch_size)
-        patches_resolution = [
-            img_size[0] // patch_size[0],
-            img_size[1] // patch_size[1],
-        ]
-        self.img_size = img_size
         self.patch_size = patch_size
-        self.patches_resolution = patches_resolution
-        self.num_patches = patches_resolution[0] * patches_resolution[1]
 
         self.in_chans = in_chans
         self.embed_dim = embed_dim
@@ -583,15 +572,28 @@ class PatchEmbed(nn.Module):
             self.norm = None
 
     def forward(self, x):
-        B, C, H, W = x.shape
-        # FIXME look at relaxing size constraints
-        assert (
-            H == self.img_size[0] and W == self.img_size[1]
-        ), f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
-        x = self.proj(x).flatten(2).transpose(1, 2)  # B Ph*Pw C
+        _, _, H, W = x.shape
+        Ph, Pw = self.patch_size
+
+        # Padding to make x an even multiple of patches
+        if W % Pw != 0:
+            x = F.pad(x, (0, Pw - W % Pw))
+        if H % Ph != 0:
+            x = F.pad(x, (0, 0, 0, Ph - H % Ph))
+
+        # batch channel img-h img-w -> batch embed window-h window-w
+        # window-h is img-h / patch-h
+        x = self.proj(x)
+
+        _, _, Wh, Ww = x.shape
+
+        # batch embed window-h window-w -> batch window-h * window-w embed
+        x = x.flatten(2).transpose(1, 2)
         if self.norm is not None:
             x = self.norm(x)
-        return x
+
+        # batch window-h * window-w embed
+        return x, Wh, Ww
 
 
 class SwinTransformerV2(nn.Module):
@@ -600,7 +602,8 @@ class SwinTransformerV2(nn.Module):
           https://arxiv.org/pdf/2103.14030
 
     Args:
-        img_size (int | tuple(int)): Input image size. Default 224
+        pretrain_img_size (int | tuple(int)): Input image size for training the pretrained model,
+            used in absolute position embedding. Default 224.
         patch_size (int | tuple(int)): Patch size. Default: 4
         in_chans (int): Number of input image channels. Default: 3
         num_classes (int): Number of classes for classification head. Default: 1000
@@ -622,7 +625,7 @@ class SwinTransformerV2(nn.Module):
 
     def __init__(
         self,
-        img_size=224,
+        pretrain_img_size=224,
         patch_size=4,
         in_chans=3,
         num_classes=1000,
@@ -645,6 +648,7 @@ class SwinTransformerV2(nn.Module):
         super().__init__()
 
         self.num_classes = num_classes
+        self.pretrain_img_size = pretrain_img_size
         self.num_layers = len(depths)
         self.embed_dim = embed_dim
         self.ape = ape
@@ -654,22 +658,15 @@ class SwinTransformerV2(nn.Module):
 
         # split image into non-overlapping patches
         self.patch_embed = PatchEmbed(
-            img_size=img_size,
             patch_size=patch_size,
             in_chans=in_chans,
             embed_dim=embed_dim,
             norm_layer=norm_layer if self.patch_norm else None,
         )
-        num_patches = self.patch_embed.num_patches
-        patches_resolution = self.patch_embed.patches_resolution
-        self.patches_resolution = patches_resolution
 
         # absolute position embedding
         if self.ape:
-            self.absolute_pos_embed = nn.Parameter(
-                torch.zeros(1, num_patches, embed_dim)
-            )
-            trunc_normal_(self.absolute_pos_embed, std=0.02)
+            raise NotImplementedError("Didn't implement absolute position embedding!")
 
         self.pos_drop = nn.Dropout(p=drop_rate)
 
@@ -729,10 +726,12 @@ class SwinTransformerV2(nn.Module):
     def no_weight_decay_keywords(self):
         return {"cpb_mlp", "logit_scale", "relative_position_bias_table"}
 
-    def forward_features(self, x):
-        x = self.patch_embed(x)
+    def forward(self, x):
+        x, Wh, Ww = self.patch_embed(x)
+
         if self.ape:
-            x = x + self.absolute_pos_embed
+            raise NotImplementedError()
+
         x = self.pos_drop(x)
 
         for layer in self.layers:
