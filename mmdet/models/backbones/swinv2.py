@@ -75,6 +75,34 @@ def window_reverse(windows, window_size, H, W):
     return x
 
 
+def calc_attn_mask(H, W, window_size, shift_size):
+    Hp = int(np.ceil(H / window_size)) * window_size
+    Wp = int(np.ceil(W / window_size)) * window_size
+    img_mask = torch.zeros((1, Hp, Wp, 1))  # 1 Hp Wp 1
+    h_slices = (
+        slice(0, -window_size),
+        slice(-window_size, -shift_size),
+        slice(-shift_size, None),
+    )
+    w_slices = (
+        slice(0, -window_size),
+        slice(-window_size, -shift_size),
+        slice(-shift_size, None),
+    )
+    cnt = 0
+    for h in h_slices:
+        for w in w_slices:
+            img_mask[:, h, w, :] = cnt
+            cnt += 1
+    # nW, window_size, window_size, 1
+    mask_windows = window_partition(img_mask, window_size)
+    mask_windows = mask_windows.view(-1, window_size * window_size)
+    attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
+    attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(
+        attn_mask == 0, float(0.0)
+    )
+
+
 class WindowAttention(nn.Module):
     r"""Window based multi-head self attention (W-MSA) module with relative position bias.
     It supports both of shifted and non-shifted window.
@@ -312,41 +340,7 @@ class SwinTransformerBlock(nn.Module):
             drop=drop,
         )
 
-        if self.shift_size > 0:
-            # calculate attention mask for SW-MSA
-            H, W = self.input_resolution
-            img_mask = torch.zeros((1, H, W, 1))  # 1 H W 1
-            h_slices = (
-                slice(0, -self.window_size),
-                slice(-self.window_size, -self.shift_size),
-                slice(-self.shift_size, None),
-            )
-            w_slices = (
-                slice(0, -self.window_size),
-                slice(-self.window_size, -self.shift_size),
-                slice(-self.shift_size, None),
-            )
-            cnt = 0
-            for h in h_slices:
-                for w in w_slices:
-                    img_mask[:, h, w, :] = cnt
-                    cnt += 1
-
-            mask_windows = window_partition(
-                img_mask, self.window_size
-            )  # nW, window_size, window_size, 1
-            mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
-            attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
-            attn_mask = attn_mask.masked_fill(
-                attn_mask != 0, float(-100.0)
-            ).masked_fill(attn_mask == 0, float(0.0))
-        else:
-            attn_mask = None
-
-        self.register_buffer("attn_mask", attn_mask)
-
-    def forward(self, x):
-        H, W = self.input_resolution
+    def forward(self, x, H, W, attn_mask):
         B, L, C = x.shape
         assert L == H * W, "input feature has wrong size"
 
@@ -364,8 +358,10 @@ class SwinTransformerBlock(nn.Module):
             shifted_x = torch.roll(
                 x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2)
             )
+            assert attn_mask is not None
         else:
             shifted_x = x
+            attn_mask = None
 
         # partition windows
         # nW*B, window_size, window_size, C
@@ -375,7 +371,7 @@ class SwinTransformerBlock(nn.Module):
 
         # W-MSA/SW-MSA
         # nW*B, window_size*window_size, C
-        attn_windows = self.attn(x_windows, mask=self.attn_mask)
+        attn_windows = self.attn(x_windows, mask=attn_mask)
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
@@ -451,8 +447,8 @@ class BasicLayer(nn.Module):
         input_resolution (tuple[int]): Input resolution.
         depth (int): Number of blocks.
         num_heads (int): Number of attention heads.
-        window_size (int): Local window size.
         mlp_ratio (float): Ratio of mlp hidden dim to embedding dim.
+        window_size (int): Local window size. Default: 7.
         qkv_bias (bool, optional): If True, add a learnable bias to query, key, value. Default: True
         drop (float, optional): Dropout rate. Default: 0.0
         attn_drop (float, optional): Attention dropout rate. Default: 0.0
@@ -469,7 +465,7 @@ class BasicLayer(nn.Module):
         input_resolution,
         depth,
         num_heads,
-        window_size,
+        window_size=7,
         mlp_ratio=4.0,
         qkv_bias=True,
         drop=0.0,
@@ -482,6 +478,8 @@ class BasicLayer(nn.Module):
     ):
 
         super().__init__()
+        self.window_size = window_size
+        self.shift_size = window_size // 2
         self.dim = dim
         self.input_resolution = input_resolution
         self.depth = depth
@@ -494,8 +492,8 @@ class BasicLayer(nn.Module):
                     dim=dim,
                     input_resolution=input_resolution,
                     num_heads=num_heads,
-                    window_size=window_size,
-                    shift_size=0 if (i % 2 == 0) else window_size // 2,
+                    window_size=self.window_size,
+                    shift_size=0 if (i % 2 == 0) else self.shift_size,
                     mlp_ratio=mlp_ratio,
                     qkv_bias=qkv_bias,
                     drop=drop,
@@ -518,12 +516,14 @@ class BasicLayer(nn.Module):
         else:
             self.downsample = None
 
-    def forward(self, x):
+    def forward(self, x, H, W):
+        attn_mask = calc_attn_mask(H, W, self.window_size, self.shift_size)
+
         for blk in self.blocks:
             if self.use_checkpoint:
-                x = checkpoint.checkpoint(blk, x)
+                x = checkpoint.checkpoint(blk, x, H, W, attn_mask)
             else:
-                x = blk(x)
+                x = blk(x, H, W, attn_mask)
         if self.downsample is not None:
             x = self.downsample(x)
         return x
