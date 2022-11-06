@@ -32,6 +32,6 @@ model = dict(
 
 data = dict(
     # OVERRIDE: machine-specific (GPU memory)
-    samples_per_gpu=2,
+    samples_per_gpu=4,
     workers_per_gpu=2,
 )
