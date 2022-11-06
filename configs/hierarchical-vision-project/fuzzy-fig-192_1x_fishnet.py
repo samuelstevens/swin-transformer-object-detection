@@ -101,7 +101,11 @@ train_pipeline = [
     dict(type="DefaultFormatBundle"),
     dict(type="Collect", keys=["img", "gt_bboxes", "gt_labels"]),
 ]
-data = dict(train=dict(pipeline=train_pipeline))
+data = dict(
+    samples_per_gpu=2,
+    workers_per_gpu=2,
+    train=dict(pipeline=train_pipeline),
+)
 
 optimizer = dict(
     _delete_=True,
@@ -119,3 +123,5 @@ optimizer = dict(
 )
 lr_config = dict(warmup_iters=1000, step=[27, 33])
 runner = dict(max_epochs=12)
+
+auto_scale_lr = dict(enable=True, base_batch_size=16)
